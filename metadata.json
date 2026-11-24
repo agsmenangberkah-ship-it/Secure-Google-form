@@ -1,0 +1,6 @@
+{
+  "name": "STANSA SECURE FORM",
+  "description": "Secure Examination Gateway berbasis Google Form untuk SMPN 1 Tanjungsari, Sumedang.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
