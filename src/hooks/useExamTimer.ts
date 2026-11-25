@@ -22,10 +22,12 @@ interface UseExamTimerOptions {
 export interface UseExamTimerResult {
   remainingMs: number;
   isExpired: boolean;
+  isFinished: boolean;
   formattedTime: string;
   status: TimerVisualStatus;
   activeWarning: TimerWarningThreshold | null;
   dismissWarning: () => void;
+  markExamFinished: () => void;
   examStartedAt: number;
   examEndAt: number;
 }
@@ -43,6 +45,9 @@ export function useExamTimer({
   useEffect(() => {
     onExpireRef.current = onExpire;
   }, [onExpire]);
+
+  const isLockedRef = useRef(isLocked);
+  isLockedRef.current = isLocked;
 
   // Initialize or restore persisted timestamp record synchronously on mount
   const initialRecordRef = useRef<ExamTimerStateRecord | null>(null);
@@ -69,14 +74,25 @@ export function useExamTimer({
   const [remainingMs, setRemainingMs] = useState<number>(() => {
     if (!enabled) return Math.max(0, durationMinutes) * 60 * 1000;
     const rec = recordRef.current;
-    if (rec.status === 'EXAM_EXPIRED') return 0;
+    if (rec.status === 'EXAM_EXPIRED' || rec.status === 'EXAM_FINISHED') {
+      return 0;
+    }
     return Math.max(0, rec.endAt - Date.now());
   });
 
   const [isExpired, setIsExpired] = useState<boolean>(() => {
     if (!enabled) return false;
     const rec = recordRef.current;
-    return rec.status === 'EXAM_EXPIRED' || Date.now() >= rec.endAt;
+    return (
+      rec.status === 'EXAM_EXPIRED' ||
+      rec.status === 'EXAM_FINISHED' ||
+      Date.now() >= rec.endAt
+    );
+  });
+
+  const [isFinished, setIsFinished] = useState<boolean>(() => {
+    if (!enabled) return false;
+    return recordRef.current.status === 'EXAM_FINISHED';
   });
 
   const [activeWarning, setActiveWarning] =
@@ -86,11 +102,42 @@ export function useExamTimer({
     setActiveWarning(null);
   }, []);
 
-  // Persist LOCKED status without erasing stansa_exam_end_at
+  // Only allow marking EXAM_FINISHED after exam time has genuinely expired
+  const markExamFinished = useCallback(() => {
+    const current = recordRef.current;
+    if (
+      current.status !== 'EXAM_EXPIRED' &&
+      current.status !== 'EXAM_FINISHED' &&
+      Date.now() < current.endAt
+    ) {
+      return;
+    }
+
+    const finishedRecord: ExamTimerStateRecord = {
+      ...current,
+      status: 'EXAM_FINISHED',
+      warning15Shown: true,
+      warning5Shown: true,
+      warning1Shown: true,
+    };
+    recordRef.current = finishedRecord;
+    saveExamTimerRecord(finishedRecord);
+    setIsExpired(true);
+    setIsFinished(true);
+    setRemainingMs(0);
+    setActiveWarning(null);
+  }, []);
+
+  // Persist LOCKED status without erasing stansa_exam_end_at or stopping countdown
   useEffect(() => {
     if (!enabled || !isLocked) return;
+    setActiveWarning(null);
     const current = recordRef.current;
-    if (current.status !== 'EXAM_EXPIRED' && current.status !== 'EXAM_LOCKED') {
+    if (
+      current.status !== 'EXAM_EXPIRED' &&
+      current.status !== 'EXAM_FINISHED' &&
+      current.status !== 'EXAM_LOCKED'
+    ) {
       const updated: ExamTimerStateRecord = {
         ...current,
         status: 'EXAM_LOCKED',
@@ -100,19 +147,15 @@ export function useExamTimer({
     }
   }, [enabled, isLocked]);
 
-  // Single timestamp-driven interval + immediate visibility/focus resync
+  // Single timestamp-driven interval + immediate visibility/focus resync.
+  // Continues running while EXAM_LOCKED so EXAM_LOCKED automatically transitions
+  // to EXAM_EXPIRED once Date.now() >= examEndAt.
   useEffect(() => {
     if (!enabled || !isValidExamDuration(durationMinutes)) return;
 
     const rec = recordRef.current;
 
-    if (import.meta.env.DEV) {
-      console.info(
-        `[STANSA TIMER]\nExam started: ${new Date(rec.startedAt).toISOString()}\nExam end: ${new Date(rec.endAt).toISOString()}\nRemaining: ${formatTimeRemaining(Math.max(0, rec.endAt - Date.now()))}\nStatus: ${rec.status}`
-      );
-    }
-
-    if (rec.status === 'EXAM_EXPIRED' || isLocked) {
+    if (rec.status === 'EXAM_EXPIRED' || rec.status === 'EXAM_FINISHED') {
       return;
     }
 
@@ -123,40 +166,53 @@ export function useExamTimer({
 
       setRemainingMs(nextRemaining);
 
-      if (now >= current.endAt || current.status === 'EXAM_EXPIRED') {
+      if (
+        now >= current.endAt ||
+        current.status === 'EXAM_EXPIRED' ||
+        current.status === 'EXAM_FINISHED'
+      ) {
+        const nextStatus =
+          current.status === 'EXAM_FINISHED' ? 'EXAM_FINISHED' : 'EXAM_EXPIRED';
         const expiredRecord: ExamTimerStateRecord = {
           ...current,
-          status: 'EXAM_EXPIRED',
+          status: nextStatus,
           warning15Shown: true,
           warning5Shown: true,
           warning1Shown: true,
         };
         recordRef.current = expiredRecord;
         saveExamTimerRecord(expiredRecord);
+        setRemainingMs(0);
         setIsExpired(true);
+        if (nextStatus === 'EXAM_FINISHED') {
+          setIsFinished(true);
+        }
         setActiveWarning(null);
         onExpireRef.current?.();
         return true;
       }
 
-      const evaluation = evaluateNextTimerWarning({
-        remainingMs: nextRemaining,
-        durationMinutes,
-        flags: {
-          warning15Shown: current.warning15Shown,
-          warning5Shown: current.warning5Shown,
-          warning1Shown: current.warning1Shown,
-        },
-      });
+      // Suppress timed threshold modals while student is already on EXAM_LOCKED screen
+      if (!isLockedRef.current) {
+        const evaluation = evaluateNextTimerWarning({
+          remainingMs: nextRemaining,
+          durationMinutes,
+          flags: {
+            warning15Shown: current.warning15Shown,
+            warning5Shown: current.warning5Shown,
+            warning1Shown: current.warning1Shown,
+          },
+        });
 
-      if (evaluation.triggered !== null) {
-        const updated: ExamTimerStateRecord = {
-          ...current,
-          ...evaluation.nextFlags,
-        };
-        recordRef.current = updated;
-        saveExamTimerRecord(updated);
-        setActiveWarning(evaluation.triggered);
+        if (evaluation.triggered !== null) {
+          const updated: ExamTimerStateRecord = {
+            ...current,
+            ...evaluation.nextFlags,
+          };
+          recordRef.current = updated;
+          saveExamTimerRecord(updated);
+          setActiveWarning(evaluation.triggered);
+        }
       }
 
       return false;
@@ -189,7 +245,7 @@ export function useExamTimer({
       window.removeEventListener('focus', handleVisibilityOrFocus);
       window.removeEventListener('pageshow', handleVisibilityOrFocus);
     };
-  }, [examId, durationMinutes, enabled, isLocked]);
+  }, [examId, durationMinutes, enabled]);
 
   const status: TimerVisualStatus = isExpired
     ? 'EXPIRED'
@@ -198,10 +254,12 @@ export function useExamTimer({
   return {
     remainingMs,
     isExpired,
+    isFinished,
     formattedTime: formatTimeRemaining(remainingMs),
     status,
     activeWarning,
     dismissWarning,
+    markExamFinished,
     examStartedAt: recordRef.current.startedAt,
     examEndAt: recordRef.current.endAt,
   };

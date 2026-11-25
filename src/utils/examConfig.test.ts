@@ -38,6 +38,7 @@ import {
 } from './examSecurity';
 import { createStudentSession, parseStudentSession } from './studentSession';
 import {
+  canShowExitButton,
   evaluateNextTimerWarning,
   formatTimeRemaining,
   getTimerVisualStatus,
@@ -725,5 +726,44 @@ test('PART 5 one-time threshold warnings (15m / 5m / 1m) and strict status prior
   assert.equal(
     resolveExamControlStatus({ isExpired: false, isLocked: false, isStarted: false }),
     'READY'
+  );
+});
+
+test('EXIT CONTROL enforces exit button strictly on EXAM_EXPIRED and guards EXAM_FINISHED behind expiry', () => {
+  // Exit button ONLY allowed on EXAM_EXPIRED
+  assert.equal(canShowExitButton('EXAM_EXPIRED'), true);
+  assert.equal(canShowExitButton('EXAM_STARTED'), false);
+  assert.equal(canShowExitButton('EXAM_LOCKED'), false);
+  assert.equal(canShowExitButton('READY'), false);
+  assert.equal(canShowExitButton('EXAM_FINISHED'), false);
+
+  // EXAM_FINISHED cannot bypass an active or locked unexpired exam
+  assert.equal(
+    resolveExamControlStatus({
+      isExpired: false,
+      isLocked: false,
+      isStarted: true,
+      isFinished: true,
+    }),
+    'EXAM_STARTED'
+  );
+  assert.equal(
+    resolveExamControlStatus({
+      isExpired: false,
+      isLocked: true,
+      isStarted: true,
+      isFinished: true,
+    }),
+    'EXAM_LOCKED'
+  );
+  // Once expired + exited -> EXAM_FINISHED
+  assert.equal(
+    resolveExamControlStatus({
+      isExpired: true,
+      isLocked: true,
+      isStarted: true,
+      isFinished: true,
+    }),
+    'EXAM_FINISHED'
   );
 });

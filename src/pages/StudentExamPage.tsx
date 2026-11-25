@@ -29,6 +29,7 @@ import {
   initializeOrLoadExamTimer,
   isPersistedExamExpired,
   isValidExamDuration,
+  loadExamTimerRecord,
 } from '../utils/examTimer';
 
 // Admin access is intentionally separated from the student exam interface.
@@ -91,19 +92,25 @@ export function StudentExamPage({ encodedConfig }: StudentExamPageProps) {
       setConfig(decoded);
       const existingSession = loadStudentSession(decoded.examId, decoded.classes);
       const persistedViolation = loadViolationHistory(decoded.examId);
-      const persistedExpired =
-        decoded.security.timer && isPersistedExamExpired(decoded.examId);
+      const persistedTimer = loadExamTimerRecord(decoded.examId);
+      const persistedExpired = isPersistedExamExpired(decoded.examId);
 
       if (existingSession) {
         setActiveSession(existingSession);
         setPageState('EXAM_STARTED');
-      } else if (persistedExpired || persistedViolation.examStatus === 'LOCKED') {
+      } else if (
+        persistedTimer ||
+        persistedExpired ||
+        persistedViolation.examStatus === 'LOCKED'
+      ) {
         setActiveSession({
           examId: decoded.examId,
           studentName: 'Peserta Ujian',
           studentId: '-',
           studentClass: decoded.classes[0] ?? '-',
-          startedAt: new Date().toISOString(),
+          startedAt: new Date(
+            persistedTimer?.startedAt ?? Date.now()
+          ).toISOString(),
         });
         setPageState('EXAM_STARTED');
       } else {
@@ -157,10 +164,8 @@ export function StudentExamPage({ encodedConfig }: StudentExamPageProps) {
     const session = createStudentSession(config.examId, entryInput);
     saveStudentSession(session);
 
-    // Initialize timestamp-based exam timer immediately on YA, MULAI UJIAN
-    if (config.security.timer) {
-      initializeOrLoadExamTimer(config.examId, config.durationMinutes, Date.now());
-    }
+    // Always initialize timestamp-based exam timer immediately on YA, MULAI UJIAN
+    initializeOrLoadExamTimer(config.examId, config.durationMinutes, Date.now());
 
     setActiveSession(session);
     setIsConfirmOpen(false);

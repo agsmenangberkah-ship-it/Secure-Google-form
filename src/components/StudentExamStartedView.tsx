@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  CheckCircle2,
   Clock,
   Loader2,
   Lock,
+  LogOut,
   Maximize,
   RefreshCw,
   ShieldAlert,
@@ -18,6 +20,7 @@ import {
   type ExamConfig,
 } from '../utils/examConfig';
 import {
+  exitAppFullscreen,
   isDocumentFullscreen,
   isFullscreenSupported,
   requestAppFullscreen,
@@ -36,6 +39,7 @@ import {
   type ViolationType,
 } from '../utils/examSecurity';
 import {
+  canShowExitButton,
   getTimerWarningContent,
   resolveExamControlStatus,
   type TimerVisualStatus,
@@ -44,6 +48,10 @@ import type { StudentExamSession } from '../utils/studentSession';
 
 // Admin access is intentionally separated from the student exam interface.
 // Admin panel tidak ditautkan dari halaman ujian siswa.
+//
+// STANSA SECURE FORM is a browser-based exam wrapper.
+// Security controls are deterrence and session controls,
+// not a replacement for OS-level kiosk/device management.
 //
 // Google Form is cross-origin.
 // Parent page cannot access or modify the iframe DOM.
@@ -114,26 +122,36 @@ export function StudentExamStartedView({
   const securityLocked = violationHistory.examStatus === 'LOCKED';
   const violationCount = violationHistory.count;
 
-  // Centralized Timestamp-Based Exam Timer (PART 5)
+  // Centralized Timestamp-Based Exam Timer (primary source of truth for exit control)
   const timer = useExamTimer({
     examId: config.examId,
     durationMinutes: config.durationMinutes,
-    enabled: config.security.timer,
+    enabled: true,
     isLocked: securityLocked,
   });
 
-  // Strict Status Priority: EXAM_EXPIRED -> EXAM_LOCKED -> EXAM_STARTED
+  // Strict Status Priority: EXAM_FINISHED (only after expiry) -> EXAM_EXPIRED -> EXAM_LOCKED -> EXAM_STARTED
   const controlStatus = resolveExamControlStatus({
     isExpired: timer.isExpired,
     isLocked: securityLocked,
     isStarted: true,
+    isFinished: timer.isFinished,
   });
+  const isFinished = controlStatus === 'EXAM_FINISHED';
   const isExpired = controlStatus === 'EXAM_EXPIRED';
   const isLocked = controlStatus === 'EXAM_LOCKED';
-  const isTerminated = isExpired || isLocked;
+  const isTerminated = isExpired || isLocked || isFinished;
+  const isExitAllowed = isExpired || isFinished;
+  const showExitButton = canShowExitButton(controlStatus);
 
   const isTerminatedRef = useRef<boolean>(isTerminated);
   isTerminatedRef.current = isTerminated;
+
+  const isExitAllowedRef = useRef<boolean>(isExitAllowed);
+  isExitAllowedRef.current = isExitAllowed;
+
+  const isLockedRef = useRef<boolean>(isLocked);
+  isLockedRef.current = isLocked;
 
   const [isFullscreen, setIsFullscreen] = useState<boolean>(() =>
     isDocumentFullscreen()
@@ -240,8 +258,11 @@ export function StudentExamStartedView({
     };
   }, []);
 
-  // Gentle Browser Back & Page Leave Warning (active while exam is running)
+  // Browser Back & Page Leave Control (active while exam time is running, including EXAM_LOCKED)
+  // Releases cleanly once EXAM_EXPIRED or EXAM_FINISHED is reached.
   useEffect(() => {
+    if (isExitAllowedRef.current) return;
+
     try {
       window.history.pushState(
         { stansaExamGuard: true },
@@ -253,6 +274,8 @@ export function StudentExamStartedView({
     }
 
     const handlePopState = () => {
+      if (isExitAllowedRef.current) return;
+
       try {
         window.history.pushState(
           { stansaExamGuard: true },
@@ -262,13 +285,14 @@ export function StudentExamStartedView({
       } catch {
         // Ignore restricted history API contexts
       }
-      if (!isTerminatedRef.current) {
+
+      if (!isLockedRef.current) {
         setBackNavigationWarning(true);
       }
     };
 
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (isTerminatedRef.current) return;
+      if (isExitAllowedRef.current) return;
       e.preventDefault();
       e.returnValue = '';
     };
@@ -301,7 +325,105 @@ export function StudentExamStartedView({
     setIframeReloadKey((key) => key + 1);
   };
 
-  // PRIORITY 1: EXAM_EXPIRED VIEW — Persistent time-expired lock, Google Form unmounted
+  const handleExitExam = async () => {
+    if (!canShowExitButton(controlStatus)) return;
+    await exitAppFullscreen();
+    timer.markExamFinished();
+  };
+
+  // PRIORITY 0: EXAM_FINISHED VIEW — Shown only after student clicks KELUAR DARI UJIAN upon EXAM_EXPIRED
+  if (isFinished) {
+    return (
+      <div
+        data-testid="exam-finished-view"
+        data-exam-state="EXAM_FINISHED"
+        data-exam-status="EXAM_FINISHED"
+        data-violation-count={String(violationCount)}
+        className="exam-mode fixed inset-0 z-30 flex flex-col bg-slate-950 text-white"
+      >
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-800 bg-slate-900 px-3.5 py-2.5 sm:px-5">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <SchoolLogo
+              size="sm"
+              className="h-8 w-8 rounded-lg ring-0 sm:h-9 sm:w-9"
+            />
+            <div className="min-w-0">
+              <p className="truncate text-xs font-extrabold tracking-normal text-white sm:text-sm">
+                {SCHOOL_INFO.appName}
+              </p>
+              <p className="truncate text-[11px] font-semibold text-amber-300 sm:text-xs">
+                {config.examName}
+              </p>
+            </div>
+          </div>
+
+          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-emerald-600/20 px-2.5 py-1 text-[11px] font-extrabold tracking-wider text-emerald-300 ring-1 ring-emerald-500/40 whitespace-nowrap">
+            <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+            SESI SELESAI
+          </span>
+        </header>
+
+        <main className="flex flex-1 items-center justify-center overflow-y-auto p-4">
+          <section
+            role="status"
+            aria-labelledby="exam-finished-title"
+            className="w-[min(92vw,440px)] rounded-2xl border border-emerald-500/30 bg-white p-6 text-center text-slate-900 shadow-2xl sm:p-8"
+          >
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
+              <CheckCircle2 className="h-7 w-7" aria-hidden="true" />
+            </div>
+
+            <p className="mt-4 text-xs font-extrabold tracking-wider text-emerald-700">
+              KELUAR DARI SISTEM UJIAN
+            </p>
+
+            <h1
+              id="exam-finished-title"
+              className="mt-1.5 text-xl font-extrabold tracking-normal text-slate-950 sm:text-2xl"
+            >
+              SESI UJIAN SELESAI
+            </h1>
+
+            <p className="mt-3 text-sm font-semibold text-slate-800">
+              Anda telah keluar dari sistem ujian.
+            </p>
+            <p className="mt-1.5 text-sm leading-relaxed text-slate-600">
+              Anda dapat menutup tab atau jendela browser ini sekarang.
+            </p>
+
+            <div className="mt-5 space-y-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3.5 text-left text-xs sm:text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-slate-600">Status</span>
+                <strong className="font-extrabold text-emerald-700">
+                  SELESAI
+                </strong>
+              </div>
+              <div className="border-t border-slate-200 pt-2 text-slate-700">
+                <p className="truncate">
+                  Peserta:{' '}
+                  <strong className="font-bold text-slate-900">
+                    {session.studentName}
+                  </strong>
+                </p>
+                <p className="mt-0.5 tabular-nums">
+                  NIS/NISN:{' '}
+                  <strong className="font-mono font-bold text-slate-900">
+                    {session.studentId}
+                  </strong>{' '}
+                  · Kelas:{' '}
+                  <strong className="font-bold text-slate-900">
+                    {session.studentClass}
+                  </strong>
+                </p>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  // PRIORITY 1: EXAM_EXPIRED VIEW — Persistent time-expired lock, Google Form unmounted, KELUAR DARI UJIAN enabled
   if (isExpired) {
     return (
       <div
@@ -329,7 +451,7 @@ export function StudentExamStartedView({
 
           <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-red-600/20 px-2.5 py-1 text-[11px] font-extrabold tracking-wider text-red-300 ring-1 ring-red-500/40 whitespace-nowrap">
             <Lock className="h-3.5 w-3.5" aria-hidden="true" />
-            UJIAN BERAKHIR
+            WAKTU HABIS
           </span>
         </header>
 
@@ -351,15 +473,14 @@ export function StudentExamStartedView({
               id="exam-expired-title"
               className="mt-1.5 text-xl font-extrabold tracking-normal text-slate-950 sm:text-2xl"
             >
-              WAKTU UJIAN HABIS
+              WAKTU UJIAN TELAH HABIS
             </h1>
 
             <p className="mt-3 text-sm font-semibold text-slate-800">
-              Waktu yang diberikan telah selesai.
+              Waktu pengerjaan Anda telah selesai.
             </p>
             <p className="mt-1.5 text-sm leading-relaxed text-slate-600">
-              Ujian Anda telah dikunci. Silakan hubungi panitia/guru jika
-              diperlukan.
+              Silakan keluar dari sistem ujian.
             </p>
 
             <div className="mt-5 space-y-2 rounded-xl border border-red-200 bg-red-50/70 px-4 py-3.5 text-left text-xs sm:text-sm">
@@ -367,7 +488,7 @@ export function StudentExamStartedView({
                 <span className="font-medium text-slate-600">Status</span>
                 <strong className="inline-flex items-center gap-1 font-extrabold text-red-700">
                   <Lock className="h-3.5 w-3.5" aria-hidden="true" />
-                  UJIAN DIKUNCI
+                  WAKTU HABIS
                 </strong>
               </div>
               <div className="flex items-center justify-between gap-2 tabular-nums">
@@ -395,13 +516,26 @@ export function StudentExamStartedView({
                 </p>
               </div>
             </div>
+
+            {showExitButton && (
+              <button
+                type="button"
+                data-testid="exit-exam-button"
+                onClick={handleExitExam}
+                className="mt-6 inline-flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-blue-700 px-5 py-3 text-sm font-extrabold tracking-wide text-white shadow-xs transition-colors hover:bg-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500 whitespace-nowrap"
+              >
+                <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
+                KELUAR DARI UJIAN
+              </button>
+            )}
           </section>
         </main>
       </div>
     );
   }
 
-  // PRIORITY 2: EXAM_LOCKED VIEW — Persistent security lock screen, Google Form unmounted
+  // PRIORITY 2: EXAM_LOCKED VIEW — Persistent security lock screen, Google Form unmounted,
+  // timer keeps running until 00:00 -> automatic transition to EXAM_EXPIRED. No exit button here.
   if (isLocked) {
     return (
       <div
@@ -427,10 +561,20 @@ export function StudentExamStartedView({
             </div>
           </div>
 
-          <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-red-600/20 px-2.5 py-1 text-[11px] font-extrabold tracking-wider text-red-300 ring-1 ring-red-500/40 whitespace-nowrap">
-            <Lock className="h-3.5 w-3.5" aria-hidden="true" />
-            UJIAN DIKUNCI
-          </span>
+          <div className="flex shrink-0 items-center gap-2">
+            <span
+              data-testid="locked-header-timer"
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 font-mono text-xs font-extrabold tracking-tight tabular-nums whitespace-nowrap ${getTimerBadgeClasses(timer.status)}`}
+            >
+              <Clock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              {timer.formattedTime}
+            </span>
+
+            <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-red-600/20 px-2.5 py-1 text-[11px] font-extrabold tracking-wider text-red-300 ring-1 ring-red-500/40 whitespace-nowrap">
+              <Lock className="h-3.5 w-3.5" aria-hidden="true" />
+              UJIAN DIKUNCI
+            </span>
+          </div>
         </header>
 
         <main className="flex flex-1 items-center justify-center overflow-y-auto p-4">
@@ -455,14 +599,26 @@ export function StudentExamStartedView({
             </h1>
 
             <p className="mt-3 text-sm font-semibold text-slate-800">
-              Batas pelanggaran keamanan telah tercapai.
+              Sesi ujian Anda telah dikunci karena batas pelanggaran telah
+              tercapai.
             </p>
             <p className="mt-1.5 text-sm leading-relaxed text-slate-600">
-              Ujian Anda telah dikunci. Silakan hubungi panitia/guru jika
-              diperlukan.
+              Silakan menunggu sampai waktu ujian berakhir.
             </p>
 
-            <div className="mt-5 space-y-2 rounded-xl border border-red-200 bg-red-50/70 px-4 py-3.5 text-left text-xs sm:text-sm">
+            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-900 px-4 py-3 text-white">
+              <p className="text-[11px] font-bold tracking-wider text-slate-300">
+                SISA WAKTU UJIAN
+              </p>
+              <p
+                data-testid="locked-exam-timer"
+                className="mt-1 font-mono text-2xl font-extrabold tracking-tight text-amber-300 tabular-nums"
+              >
+                {timer.formattedTime}
+              </p>
+            </div>
+
+            <div className="mt-4 space-y-2 rounded-xl border border-red-200 bg-red-50/70 px-4 py-3.5 text-left text-xs sm:text-sm">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-medium text-slate-600">Status</span>
                 <strong className="font-extrabold text-red-700">
@@ -842,12 +998,13 @@ export function StudentExamStartedView({
         </div>
       )}
 
-      {/* Gentle Browser Back Navigation Warning Overlay */}
+      {/* Browser Back Navigation Warning Overlay */}
       {!activeViolationType && !fullscreenFailed && backNavigationWarning && (
         <div
           role="dialog"
           aria-modal="true"
           aria-labelledby="overlay-back-nav-title"
+          data-testid="back-navigation-warning"
           className="fixed inset-0 z-[999999] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs"
         >
           <div className="w-[min(92vw,420px)] rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-2xl sm:p-7">
@@ -858,13 +1015,13 @@ export function StudentExamStartedView({
               id="overlay-back-nav-title"
               className="mt-4 text-lg font-extrabold tracking-normal text-slate-950"
             >
-              PERHATIAN
+              UJIAN MASIH BERLANGSUNG
             </h2>
             <p className="mt-2.5 text-sm font-semibold text-slate-800">
-              Anda akan meninggalkan halaman ujian.
+              Anda tidak dapat keluar dari halaman ujian sebelum waktu berakhir.
             </p>
             <p className="mt-1.5 text-sm leading-relaxed text-slate-600">
-              Jangan keluar dari ujian.
+              Silakan kembali ke halaman ujian.
             </p>
             <button
               type="button"

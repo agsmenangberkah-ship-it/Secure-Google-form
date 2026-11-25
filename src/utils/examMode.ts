@@ -75,6 +75,7 @@ export function loadTabSwitchEvent(examId: string): TabSwitchRecord | null {
 type FullscreenDocument = Document & {
   webkitFullscreenElement?: Element | null;
   webkitFullscreenEnabled?: boolean;
+  webkitExitFullscreen?: () => Promise<void> | void;
 };
 
 type FullscreenElement = HTMLElement & {
@@ -115,6 +116,22 @@ export async function requestAppFullscreen(): Promise<boolean> {
     return false;
   } catch {
     return false;
+  }
+}
+
+export async function exitAppFullscreen(): Promise<void> {
+  if (typeof document === 'undefined') return;
+  if (!isDocumentFullscreen()) return;
+
+  const doc = document as FullscreenDocument;
+  try {
+    if (typeof doc.exitFullscreen === 'function') {
+      await doc.exitFullscreen();
+    } else if (typeof doc.webkitExitFullscreen === 'function') {
+      await Promise.resolve(doc.webkitExitFullscreen());
+    }
+  } catch {
+    // Ignore browser fullscreen exit restrictions
   }
 }
 

@@ -206,17 +206,27 @@ export function getTimerWarningContent(
 
 /**
  * Enforces strict exam status priority:
- * EXAM_EXPIRED -> EXAM_LOCKED -> EXAM_STARTED -> READY
+ * EXAM_EXPIRED (or EXAM_FINISHED once exited after expiry) -> EXAM_LOCKED -> EXAM_STARTED -> READY
  */
 export function resolveExamControlStatus(options: {
   isExpired: boolean;
   isLocked: boolean;
   isStarted: boolean;
+  isFinished?: boolean;
 }): ExamControlStatus {
+  if (options.isExpired && options.isFinished) return 'EXAM_FINISHED';
   if (options.isExpired) return 'EXAM_EXPIRED';
   if (options.isLocked) return 'EXAM_LOCKED';
   if (options.isStarted) return 'EXAM_STARTED';
   return 'READY';
+}
+
+/**
+ * Exit button ("KELUAR DARI UJIAN") may ONLY be shown when status is EXAM_EXPIRED.
+ * It must remain strictly hidden during EXAM_STARTED and EXAM_LOCKED.
+ */
+export function canShowExitButton(status: ExamControlStatus): boolean {
+  return status === 'EXAM_EXPIRED';
 }
 
 function parsePositiveTimestamp(raw: string | null): number | null {
@@ -276,6 +286,9 @@ export function initializeOrLoadExamTimer(
 ): ExamTimerStateRecord {
   const existing = loadExamTimerRecord(examId);
   if (existing) {
+    if (existing.status === 'EXAM_FINISHED') {
+      return existing;
+    }
     if (nowMs >= existing.endAt && existing.status !== 'EXAM_EXPIRED') {
       const expiredRecord: ExamTimerStateRecord = {
         ...existing,
@@ -343,5 +356,9 @@ export function isPersistedExamExpired(
 ): boolean {
   const record = loadExamTimerRecord(examId);
   if (!record) return false;
-  return record.status === 'EXAM_EXPIRED' || nowMs >= record.endAt;
+  return (
+    record.status === 'EXAM_EXPIRED' ||
+    record.status === 'EXAM_FINISHED' ||
+    nowMs >= record.endAt
+  );
 }
